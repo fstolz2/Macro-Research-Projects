@@ -1,0 +1,110 @@
+---
+title: "BLS Data Research"
+author: "Freddy"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+
+```{r}
+install.packages("fredr")
+library(ggplot2)
+library(fredr)
+library(dplyr)
+library(tibble)
+```
+
+```{r}
+FRED_API_key <- "974a37faabd0e0d5caa12d0123046237"
+fredr_set_key(FRED_API_key)
+fredr_has_key()
+```
+
+
+```{r}
+payems <- fredr(series_id = "PAYEMS")
+head(payems)
+
+full_history <- fredr(
+  series_id = "PAYEMS",
+  observation_start = as.Date("2023-06-01"),
+  observation_end = as.Date("2023-06-01"),
+  realtime_start = as.Date("1776-07-04"),
+  realtime_end = as.Date(Sys.Date())
+)
+full_history
+```
+
+```{r}
+#Date pull
+payems_pull <- function(day=1, month, year){
+  true_day = as.character(day)
+  true_month = as.character(month)
+  true_year = as.character(year)
+  true_date = as.Date(paste(true_year, true_month, true_day, sep = "-"))
+  pull = fredr(
+    series_id = "PAYEMS",
+    observation_start = as.Date(true_date),
+    observation_end = as.Date(true_date),
+    realtime_start = as.Date("1776-07-04"),
+    realtime_end = as.Date(Sys.Date())
+  )
+  return(pull)
+  }
+```
+
+```{r}
+#Getting just the first 3 rows
+first_three <- function(table){
+  table |> slice(1:3)
+}
+first_three(payems_pull(1,1,2015))
+```
+
+```{r}
+#loop to big build table with all months and monthly revisions since start year (2015)
+pull_since_year <- function(start_year = 2015, end_year = 2026, end_month = 6) {
+  big_table <- tibble()
+  for (year in start_year:end_year) {
+    for (month in 1:12) {
+      if (year == end_year && month > end_month) next  # skip past June 2026
+      monthly_rows <- first_three(payems_pull(1, month, year))
+      big_table <- bind_rows(big_table, monthly_rows)
+    }
+  }
+  return(big_table)
+}
+```
+
+```{r}
+Sample_data <- pull_since_year(2015)
+Sample_data
+```
+
+
+```{r}
+#Creating the Adjustment column and squared adjustment for a given result + more
+Revision_data = Sample_data |> group_by(date) |> mutate(revision = value - first(value)) |> mutate(squared_revision = revision**2) 
+Revision_data2 = Revision_data |> mutate(pct_revision = (value - first(value)) / first(value))
+Revision_data3 = Revision_data2 |> mutate(abs_revision = (abs(revision)), .before = squared_revision) |> mutate(abs_pct_revision = abs(pct_revision))
+Revision_data3
+```
+
+```{r}
+#4 plots to highlight
+ggplot(Revision_data3, aes(x = date, y = revision)) +
+  geom_col(fill = "royalblue") + 
+  labs(x = "Date", y = "Revision")
+ggplot(Revision_data3, aes(x = date, y = revision)) +
+  geom_smooth(color = "royalblue") + 
+  labs(x = "Date", y = "Revision")
+Revision_data3 |> filter(revision != 0) |> ggplot(aes(x = date, y = abs_pct_revision)) +
+  geom_col(fill = "royalblue") +
+  labs(x = "Date", y = "Absolute Value of Percentage of Revision")
+Revision_data3 |> filter(revision != 0) |> ggplot(aes(x = date, y = abs_pct_revision)) +
+  geom_smooth(color = "royalblue") +
+  labs(x = "Date", y = "Absolute Value of Percentage of Revision")
+
+```
+
