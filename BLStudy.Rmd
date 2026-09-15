@@ -16,8 +16,7 @@ library(tibble)
 ```
 
 ```{r}
-FRED_API_key <- "974a37faabd0e0d5caa12d0123046237"
-fredr_set_key(FRED_API_key)
+FRED_API_key <- fredr_set_key(Sys.getenv("FRED_API_KEY"))
 fredr_has_key()
 ```
 
