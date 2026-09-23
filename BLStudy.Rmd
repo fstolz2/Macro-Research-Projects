@@ -5,23 +5,45 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
+**Intro:** There has been a lot of discussion lately about the Bureau of Labor statistics making sizable revisions to their payroll numbers, and how those revisions are typically negative. I am here to ask the question, are the revisions truly getting bigger, or is it just talk?
+
+The question of interest for this project is: Are BLS payroll revisions significantly increasing in magnitude over time? And are the payroll revisions trending downward over time?
+
+**Thesis:** This project finds that the size of monthly revisions to initial BLS payroll estimates has grown significantly since 2015, based on a linear regression of absolute revision value against time once the Covid years (2020-2022) are removed. This project also finds that the direction of those revisions has shifted more downwards since 2015 based on a hypothesis test on the revision value against time once the Covid years (2020-2022) are removed.
+
+**Data Structure:** Every 3 rows in the sampled data is 1) the initial change in payroll estimate (in thousands of persons), 2) the revision of that estimated change after 1 month, 3) the revision of estimated change after 2 months. I excluded the benchmark revisions that are done in February because each year has a different amount of benchmark revisions and while they're important in their own right, they're not relevant to the argument about BLS data lagging lately.
+2 other data sets are created, one without the first month of estimates, this one is used for graphing because it excludes the 1/3 of data points that would have a 0 revision. I also ended up making a data set that did not include Covid data because its presence confounded from what was being measured.
+
+**Variables:**
+date: The date from which the change in payroll measurement is made
+realtime_start: The date in which that estimate was released
+change: The estimated change in payroll for that month (in thousands of people)
+revision: The amount that the payroll estimate was revised from the original measurement
+abs_revision: An absolute value of the revision for a magnitude measurement
+year_decimal: A numerical representation of months in a year so that it can be used in numerical modeling
 
 
-```{r}
-install.packages("fredr")
+**Why 2015?** 2015 was selected because it provides a substantial amount of data and includes intriguing data from 2020 that can be used as an interesting reference point for some of the revisions in the past 5 years. We end up getting 396 rows of data, but because each date includes 2 revisions that's 132 months collected and 264 revisions collected (132 from 1 month after and 132 from 2 months after)
+
+**Unusual Factors:** One unusual factor in the data is the 2020 Pandemic being included and its subsequent bounce back. It definitely is an outlier stretch of years in terms of revisions. I ended up ignoring this stretch in the final statistical analysis because it detracted from the true tests I'm trying to run. It's still an interesting comparison point in graphical analysis, but for hypothesis testing it is inconvenient.
+
+
+```{r, include=FALSE}
+rm(list = ls())
 library(ggplot2)
 library(fredr)
 library(dplyr)
 library(tibble)
+library(lubridate)
+library(purrr)
 ```
 
-```{r}
-FRED_API_key <- fredr_set_key(Sys.getenv("FRED_API_KEY"))
+```{r, include=FALSE}
+fredr_set_key(Sys.getenv("FRED_API_KEY"))
 fredr_has_key()
 ```
 
-
-```{r}
+```{r, include=FALSE}
 payems <- fredr(series_id = "PAYEMS")
 head(payems)
 
@@ -35,7 +57,7 @@ full_history <- fredr(
 full_history
 ```
 
-```{r}
+```{r, include=FALSE}
 #Date pull
 payems_pull <- function(day=1, month, year){
   true_day = as.character(day)
@@ -54,6 +76,24 @@ payems_pull <- function(day=1, month, year){
 ```
 
 ```{r}
+#Claude informed me that the system I was running before caused the revisions to compound in size over time naturally because of how I was calculating it as a change from the beginning of the month and not a total consideration of changes from months previous as well. Good learning. I understand my mistake now. 
+change_at_vintage <- function(ref_date, vintage_date) {
+  prior_date <- ref_date %m-% months(1)
+  
+  pull <- fredr(
+    series_id = "PAYEMS",
+    observation_start = prior_date,
+    observation_end = ref_date,
+    realtime_start = vintage_date,
+    realtime_end = vintage_date
+  )
+  
+  change <- pull$value[pull$date == ref_date] - pull$value[pull$date == prior_date]
+  return(change)
+}
+```
+
+```{r, include=FALSE}
 #Getting just the first 3 rows
 first_three <- function(table){
   table |> slice(1:3)
@@ -61,49 +101,167 @@ first_three <- function(table){
 first_three(payems_pull(1,1,2015))
 ```
 
-```{r}
+```{r, include=FALSE}
 #loop to big build table with all months and monthly revisions since start year (2015)
 pull_since_year <- function(start_year = 2015, end_year = 2026, end_month = 6) {
   big_table <- tibble()
   for (year in start_year:end_year) {
     for (month in 1:12) {
-      if (year == end_year && month > end_month) next  # skip past June 2026
-      monthly_rows <- first_three(payems_pull(1, month, year))
-      big_table <- bind_rows(big_table, monthly_rows)
+      if (year == end_year && month > end_month) next
+      
+      ref_date <- as.Date(paste(year, month, 1, sep = "-"))
+      vintages <- payems_pull(1, month, year) |> first_three() |> pull(realtime_start)
+      
+      monthly_changes <- tibble(
+        date = ref_date,
+        realtime_start = vintages,
+        change = map_dbl(vintages, ~ change_at_vintage(ref_date, .x))
+      )
+      
+      big_table <- bind_rows(big_table, monthly_changes)
     }
   }
   return(big_table)
 }
-```
-
-```{r}
-Sample_data <- pull_since_year(2015)
+Sample_data <- pull_since_year()
 Sample_data
 ```
 
-
-```{r}
+```{r, include=FALSE}
 #Creating the Adjustment column and squared adjustment for a given result + more
-Revision_data = Sample_data |> group_by(date) |> mutate(revision = value - first(value)) |> mutate(squared_revision = revision**2) 
-Revision_data2 = Revision_data |> mutate(pct_revision = (value - first(value)) / first(value))
-Revision_data3 = Revision_data2 |> mutate(abs_revision = (abs(revision)), .before = squared_revision) |> mutate(abs_pct_revision = abs(pct_revision))
-Revision_data3
+Revision_data <- Sample_data |>
+  group_by(date) |>
+  mutate(revision = change - first(change)) |>
+  mutate(abs_revision = abs(revision))
+
+#getting rid of zeroes and cleaning the date info
+Revision_data_nonzero <- Revision_data |> filter(revision != 0)
+Revision_data_nonzero <- Revision_data_nonzero |> mutate(year = year(date))
+Revision_data_nonzero <- Revision_data_nonzero |> mutate(year_decimal = decimal_date(date))
+Revision_data_nonzero
+
+#no covid data and first set of correlations
+Revision_data_no_covid <- Revision_data_nonzero |> 
+  filter(date < as.Date("2020-01-01") | date > as.Date("2022-12-31"))
+
+cor_value_rev <- cor(Revision_data_nonzero$year_decimal, Revision_data_nonzero$revision)
+cor_value_abs_rev <- cor(Revision_data_nonzero$year_decimal, Revision_data_nonzero$abs_revision)
 ```
 
-```{r}
+Here are some graphs that I think are important to analyze when looking at the core questions that are being asked about BLS payroll revisions.
+
+```{r, echo=FALSE,  message=FALSE}
 #4 plots to highlight
-ggplot(Revision_data3, aes(x = date, y = revision)) +
-  geom_col(fill = "royalblue") + 
-  labs(x = "Date", y = "Revision")
-ggplot(Revision_data3, aes(x = date, y = revision)) +
-  geom_smooth(color = "royalblue") + 
-  labs(x = "Date", y = "Revision")
-Revision_data3 |> filter(revision != 0) |> ggplot(aes(x = date, y = abs_pct_revision)) +
-  geom_col(fill = "royalblue") +
-  labs(x = "Date", y = "Absolute Value of Percentage of Revision")
-Revision_data3 |> filter(revision != 0) |> ggplot(aes(x = date, y = abs_pct_revision)) +
-  geom_smooth(color = "royalblue") +
-  labs(x = "Date", y = "Absolute Value of Percentage of Revision")
+ggplot(Revision_data_nonzero, aes(x = date, y = revision)) +
+  geom_col() + 
+  labs(x = "Date", y = "Revision (thousands of jobs)")
+
+ggplot(Revision_data_nonzero, aes(x = date, y = abs_revision)) +
+  geom_col() +
+  labs(x = "Date", y = "Absolute Value of Revision (thousands of jobs)")
+
+ggplot(Revision_data_nonzero, aes(x = date, y = revision)) +
+  geom_smooth(, method = "lm", se = F) + 
+  geom_point(alpha = 0.4) +
+  annotate("text", x = as.Date("2016-01-01"), y = 425, label = paste("r =", round(cor_value_rev, 2))) +
+  labs(x = "Date", y = "Revision (thousands of jobs)")
+
+ggplot(Revision_data_nonzero, aes(x = date, y = abs_revision)) +
+  geom_smooth(method = "lm", se = F) +
+  geom_point(alpha = 0.4) +
+  annotate("text", x = as.Date("2016-01-01"), y = 425, label = paste("r =", round(cor_value_abs_rev, 2))) +
+  labs(x = "Date", y = "Absolute Value of Revision (thousands of jobs)")
 
 ```
+
+**Graphical Analysis**
+
+**1)** The first graph is just raw revisions over time. What's striking here is the past 2.5-3 years have seen way more downward revisions than upward revisions. There's also some noticeably big spikes lately in these downward revisions. The question becomes though, are these spikes statistically significant.
+
+**2)** Here we can see another look at the revisions but just with the size. Again, there have been some more sizable revisions in the past 3 years compared to the pre-Covid revisions, but the claim still can't be made that it's anything more than chance until we run a hypothesis test.
+
+**3)** This is the graph of the first hypothesis test we'll be running, proving the revisions have/have not truly been getting more negative. You can see that the Covid fluctuations really throw a wrench in what we are actually trying to measure, the reliability of BLS payroll revisions NOT in a global recession and its bounce back.
+
+**4)** Lastly, the 4th graph shows the trend line for the 2nd hypothesis test we'll be running, proving the magnitude of payroll revisions has/has not been increasing.
+
+```{r, include=FALSE}
+#models for the covid included data. 
+model_covid_revision <- lm(revision ~ year_decimal, data = Revision_data_nonzero)
+summary(model_covid_revision)
+model_covid_abs_revision <- lm(abs_revision ~ year_decimal, data = Revision_data_nonzero)
+summary(model_covid_abs_revision)
+one_sided_p_abs <- summary(model_covid_abs_revision)$coefficients["year_decimal", "Pr(>|t|)"] / 2
+one_sided_p_rev <- summary(model_covid_revision)$coefficients["year_decimal", "Pr(>|t|)"] / 2
+one_sided_p_rev
+one_sided_p_abs
+```
+
+**Statistical Analysis:** We are doing a hypothesis test for $\beta1$, the true slope of the value of revisions since 2015. The null hypothesis is that $\beta1$ = 0. The Alternative Hypothesis is $\beta1$ < 0. The $\alpha$ level will be .01.   
+
+For the test on revision data, we get a p-value of .1057 which means that we fail to reject the null hypothesis and can't say that revisions have been trending downwards since 2015. 
+
+For the analysis on magnitude of revisions, we will be doing  hypothesis test for $\beta1$, the true slope of the value of absolute value of revisions since 2015. The null hypothesis is that $\beta1$ = 0. The Alternative Hypothesis is $\beta1$ > 0. The $\alpha$ level will be .01.
+
+
+For the absolute value of revision test, we get a p-value of .00296 which means we reject the null hypothesis and have evidence that the magnitude of revisions has been increasing since 2015.
+
+While conducting these hypothesis tests and especially while observing the graphs, it became ever more evident that the Covid data needed to be removed for a true analysis. It is important for comparison sake, but it clouds us from what we're focused on, whether BLS revisions are becoming less reliable lately or whether that's fake news. To counteract this issue, I made a second data set to analyze that doesn't include the Covid recession and subsequent rebound by excluding the data from the years 2020 to 2022.
+
+Here's the updated plots to see how our model looks
+```{r, echo=FALSE,  message=FALSE}
+covid_cor_value_rev <- cor(Revision_data_no_covid$year_decimal, Revision_data_no_covid$revision)
+covid_cor_value_abs_rev <- cor(Revision_data_no_covid$year_decimal, Revision_data_no_covid$abs_revision)
+
+ggplot(Revision_data_no_covid, aes(x = date, y = revision)) +
+  geom_smooth(, method = "lm", se = F) + 
+  geom_point(alpha = 0.4) +
+  annotate("text", x = as.Date("2016-01-01"), y = 425, label = paste("r =", round(covid_cor_value_rev, 2))) +
+  labs(x = "Date", y = "Revision (thousands of jobs)")
+
+ggplot(Revision_data_no_covid, aes(x = date, y = abs_revision)) +
+  geom_smooth(method = "lm", se = F) +
+  geom_point(alpha = 0.4) +
+  annotate("text", x = as.Date("2016-01-01"), y = 425, label = paste("r =", round(covid_cor_value_abs_rev, 2))) +
+  labs(x = "Date", y = "Absolute Value of Revision (thousands of jobs)")
+```
+
+
+```{r, include=FALSE}
+#models without 2020-2022
+model_no_covid_revision <- lm(revision ~ year_decimal, data = Revision_data_no_covid)
+summary(model_no_covid_revision)
+model_no_covid_abs_revision <- lm(abs_revision ~ year_decimal, data = Revision_data_no_covid)
+summary(model_no_covid_abs_revision)
+
+one_sided_p_no_covid_abs <- summary(model_no_covid_abs_revision)$coefficients["year_decimal", "Pr(>|t|)"] / 2
+one_sided_p_no_covid_rev <- summary(model_no_covid_revision)$coefficients["year_decimal", "Pr(>|t|)"] / 2
+one_sided_p_no_covid_rev
+one_sided_p_no_covid_abs
+```
+
+**Statistical Analysis #2:** We are doing a hypothesis test for $\beta1$, the true slope of the value of revisions since 2015 (excluding 2020-2022). The null hypothesis is that $\beta1$ = 0. The Alternative Hypothesis is $\beta1$ < 0. The $\alpha$ level will be .01.   
+
+For the test on revision data, we get a p-value of .0000919 which means we reject the null hypothesis and have evidence that the value of revisions since 2015 has been getting more negative when you exclude the Covid outlier years. This is some very strong evidence for that fact as there is only about a .001% chance that the found results are from chance alone.
+
+
+For the analysis on magnitude of revisions, we will be doing  hypothesis test for $\beta1$, the true slope of the value of absolute value of revisions since 2015 (excluding 2020-2022). The null hypothesis is that $\beta1$ = 0. The Alternative Hypothesis is $\beta1$ > 0. The $\alpha$ level will be .01.
+
+For the absolute value of revision test, we get a p-value of .00000239 which means we reject the null hypothesis and have evidence that the magnitude of revisions has been increasing since 2015 even without the covid data included. This is very strong evidence of that hypothesis as there's only about a .0002% chance our results were from chance alone.
+
+
+**Discussion:** Our testing did back up the discourse, the revisions are getting bigger and getting negative(er). This is not shocking, it's pretty evident if you look at a chart or a graph of the revisions, but it's nevertheless important to confirm that it's not just sentiment or chance.
+
+The next question becomes, what do we make of this data? This is where we get out of my depth as an economics analyst, but it's plainly evident that something needs to change. Firstly, regarding the magnitude of revisions, it's obvious that the BLS data collection methods are becoming more and more outdated. The survey method, while more thorough than your average call center survey, does not get timely enough responses compared to 10 years ago. Unfortunately, surveys become more out-of-date every passing day. In fact, BLS's own explanation of its September 2025 benchmark revision points to exactly this: the agency identified "response error" and "nonresponse error" as the primary drivers of the overestimation, meaning both the businesses that did respond and the ones that didn't were increasingly reporting or representing lower employment than the survey initially captured (BLS, 2025). In addition to this general dying off of survey participation, the BLS survey has no incentives for respondents. The alternative is way too costly, but it's tough to convince households and especially companies to respond in a timely fashion without offering anything directly in return.
+
+Secondly, regarding the direction of the revisions, there's a lot more to discuss. Most obviously of note is that this pattern of consistent downward revisions occurs when economic activity is cooling and the economy is headed towards a recession. This is because the "Business birth/death model" that the BLS uses tends to overestimate the amount of jobs created by "birthed" businesses during slower economic activity. Additionally, some of the (potential) causes of this slower economic activity compound with the lagging response rates to make such sharp downward revisions. Economists at the Economic Policy Institute have specifically pointed to slower net immigration and slower net business creation as likely contributors to the CES sample becoming less representative over this period (EPI, 2025). Things like lower net immigration and slower net business creation are exactly what lagging survey responses are bad at catching quickly. Basically, the initial survey responses (the ones responded to within the month) are the ones most subject to non-response bias from companies that are experiencing slower business.
+
+All in all, while these 2 trends are separate, they're also incredibly linked. It's going to be impossible to correct the magnitude issue without first correcting the non-response bias that exists more and more prevalent, in part due to apathy towards surveys, but also due to slow economic times making slow responses. However, it's also going to be impossible to not have so many downwards revisions if you can't change the system to incentivize more immediate responses. It's a chicken and the egg type of scenario, and I'm not near able enough to solve it, but I believe that the changing times can be overcome just as they have needed to many times before.
+
+References:
+Bureau of Labor Statistics. (2025). Current Employment Statistics preliminary benchmark (national) – March 2025. https://www.bls.gov/news.release/pdf/prebmk.pdf
+Economic Policy Institute. (2025). Today's BLS preliminary benchmark revisions are necessary for timely and accurate data—not fodder for Trump's attacks. https://www.epi.org/blog/todays-bls-preliminary-benchmark-revisions-are-necessary-for-timely-and-accurate-data-not-fodder-for-trumps-attacks/
+
+
+That is all. Thank you for reading my project.
+
 
